@@ -334,19 +334,27 @@
 
 ;; User interface
 
+(defvar httpd-maybe-cache t)
+(defvar httpd-body-docorator (lambda (_ body) body))
+
 ;;;###autoload
-(defun httpd-start ()
+(cl-defun httpd-start
+    (&key (root nil) (host "0.0.0.0") (port httpd-port)
+          (cache nil) (body-decorator httpd-body-docorator))
   "Start the web server process. If the server is already
 running, this will restart the server. There is only one server
 instance per Emacs instance."
   (interactive)
   (httpd-stop)
   (httpd-log `(start ,(current-time-string)))
+  (if root (setq httpd-root root))
+  (setq httpd-maybe-cache cache)
+  (if body-decorator (setq httpd-body-docorator body-decorator))
   (make-network-process
    :name     "httpd"
-   :service  httpd-port
+   :service  port
    :server   t
-   :host     httpd-host
+   :host     host
    :family   httpd-ip-family
    :filter   'httpd--filter
    :coding   'binary
@@ -820,8 +828,9 @@ the `httpd-current-proc' as the process."
   (httpd-discard-buffer)
   (let ((req-etag (cadr (assoc "If-None-Match" req)))
         (etag (httpd-etag path))
-        (mtime (httpd-date-string (nth 4 (file-attributes path)))))
-    (if (equal req-etag etag)
+        (mtime (httpd-date-string (nth 4 (file-attributes path))))
+        (mime (httpd-get-mime (file-name-extension path))))
+    (if (and httpd-maybe-cache (equal req-etag etag))
         (with-temp-buffer
           (httpd-log `(file ,path not-modified))
           (httpd-send-header proc "text/plain" 304))
@@ -829,8 +838,11 @@ the `httpd-current-proc' as the process."
       (with-temp-buffer
         (set-buffer-multibyte nil)
         (insert-file-contents-literally path)
-        (httpd-send-header proc (httpd-get-mime (file-name-extension path))
-                           200 :Last-Modified mtime :ETag etag)))))
+        (insert (prog1 (funcall httpd-body-docorator mime (buffer-string))
+                  (erase-buffer)))
+        (httpd-send-header proc mime 200
+                           :Cache-Control "no-cache,no-store"
+                           :Last-Modified mtime :ETag etag)))))
 
 (defun httpd-send-directory (proc path uri-path)
   "Serve a file listing to the client. If PROC is T use the
